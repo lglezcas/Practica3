@@ -15,14 +15,14 @@ while True:
 
     if username == "BR":
         host = hostBR
-        print("""Select one command:,
-        1: Change or check IP address from Hub Sensor,
+        print("""Select one command:
+        1: Change or check IP address from Hub Sensor
         2: Change operation mode""")
         command_selected = input()
         if command_selected == "1":
             path = "ipconfig"
-            print("""IP address sensor hub menu:,
-            1: Get current IP address,
+            print("""IP address sensor hub menu:
+            1: Get current IP address
             2: Change IP address""")
             inst_selected = input()
             if inst_selected == "1":
@@ -56,10 +56,10 @@ while True:
             client.stop()
     elif username == "ED":
         host = hostED
-        print(""""Select one command:,
-        1: Change or check sampling rate,
-        2: Read temperature,
-        3: Read humidity"""")
+        print("""Select one command:
+        1: Change or check sampling rate
+        2: Read temperature
+        3: Read humidity""")
         command_selected = input()
         if command_selected == "1":
             path = "SRconfig"
@@ -83,27 +83,21 @@ while True:
                 continue
         elif command_selected == "2":
             path = "temp"
+            client = HelperClient(server=(host, port))
+            response = client.get(path)
+            print(response.pretty_print())
+            client.stop()
         elif command_selected == "3":
             path = "humidity"
+            client = HelperClient(server=(host, port))
+            response = client.get(path)
+            print(response.pretty_print())
+            client.stop()
         else:
             print("Command not valid... Please try again")
             continue
-            if op_mode == "auto":
-                data_send = "auto"
-            elif op_mode == "manual":
-                data_send = "manual"
-            else:
-                data_send = op_mode
-                print("Wrong Mode Selected - Try again")
-            client = HelperClient(server=(host, port))
-            response = client.post(path,data_send)
-            print(response.pretty_print())
-            client.stop()
-
-
-
-       
-        print("Couldn't understand you... Please try again")
+    else:
+        print("Command not valid... Please try again")
         continue
     
 
