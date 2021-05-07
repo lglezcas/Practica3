@@ -96,8 +96,10 @@ Private macros
 
 #define gAppJoinTimeout_c                       800    /* miliseconds */
 
-#define APP_LED_URI_PATH                        "/led"
+#define APP_CONFIG_URI_PATH                     "/SRconfig"
+#define APP_LED_URI_PATH                     	"/led"
 #define APP_TEMP_URI_PATH                       "/temp"
+#define APP_HUM_URI_PATH                       "/humidity"
 #define APP_SINK_URI_PATH                       "/sink"
 #if LARGE_NETWORK
 #define APP_RESET_TO_FACTORY_URI_PATH           "/reset"
@@ -118,6 +120,8 @@ static bool_t mFirstPushButtonPressed = FALSE;
 
 static bool_t mJoiningIsAppInitiated = FALSE;
 
+static tmrTimerID_t sampling_tmr = gTmrInvalidTimerID_c;
+
 /*==================================================================================================
 Private prototypes
 ==================================================================================================*/
@@ -137,8 +141,11 @@ static void APP_SendLedColorWheel(void *pParam);
 static void APP_LocalDataSinkRelease(void *pParam);
 static void APP_ProcessLedCmd(uint8_t *pCommand, uint8_t dataLen);
 static void APP_CoapGenericCallback(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
+static void APP_CoapConfigCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
+
 static void APP_CoapLedCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
 static void APP_CoapTempCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
+static void APP_CoapHumidityCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
 static void APP_CoapSinkCb(coapSessionStatus_t sessionStatus, void *pData, coapSession_t *pSession, uint32_t dataLen);
 static void App_RestoreLeaderLed(void *param);
 #if LARGE_NETWORK
@@ -153,8 +160,10 @@ static void APP_AutoStartCb(void *param);
 /*==================================================================================================
 Public global variables declarations
 ==================================================================================================*/
+const coapUriPath_t gAPP_CONFIG_URI_PATH  = {SizeOfString(APP_CONFIG_URI_PATH), (uint8_t *)APP_CONFIG_URI_PATH};
 const coapUriPath_t gAPP_LED_URI_PATH  = {SizeOfString(APP_LED_URI_PATH), (uint8_t *)APP_LED_URI_PATH};
 const coapUriPath_t gAPP_TEMP_URI_PATH = {SizeOfString(APP_TEMP_URI_PATH), (uint8_t *)APP_TEMP_URI_PATH};
+const coapUriPath_t gAPP_HUM_URI_PATH = {SizeOfString(APP_HUM_URI_PATH), (uint8_t *)APP_HUM_URI_PATH};
 const coapUriPath_t gAPP_SINK_URI_PATH = {SizeOfString(APP_SINK_URI_PATH), (uint8_t *)APP_SINK_URI_PATH};
 #if LARGE_NETWORK
 const coapUriPath_t gAPP_RESET_URI_PATH = {SizeOfString(APP_RESET_TO_FACTORY_URI_PATH), (uint8_t *)APP_RESET_TO_FACTORY_URI_PATH};
@@ -182,6 +191,10 @@ tmrTimerID_t tmrStartApp = gTmrInvalidTimerID_c;
 #endif
 
 uint32_t leaderLedTimestamp = 0;
+
+uint32_t sampling_period_ms = 500;
+uint32_t sens_humidity = 0;
+uint32_t sens_temp = 0;
 
 /* Pointer application task message queue */
 taskMsgQueue_t *mpAppThreadMsgQueue = NULL;
@@ -497,8 +510,9 @@ static void APP_InitCoapDemo
     void
 )
 {
-    coapRegCbParams_t cbParams[] =  {{APP_CoapLedCb,  (coapUriPath_t *)&gAPP_LED_URI_PATH},
+    coapRegCbParams_t cbParams[] =  {{APP_CoapConfigCb,  (coapUriPath_t *)&gAPP_CONFIG_URI_PATH},
                                      {APP_CoapTempCb, (coapUriPath_t *)&gAPP_TEMP_URI_PATH},
+                                     {APP_CoapHumidityCb, (coapUriPath_t *)&gAPP_HUM_URI_PATH},
 #if LARGE_NETWORK
                                      {APP_CoapResetToFactoryDefaultsCb, (coapUriPath_t *)&gAPP_RESET_URI_PATH},
 #endif
@@ -1125,11 +1139,46 @@ static void APP_LocalDataSinkRelease
     FLib_MemCpy(&gCoapDestAddress, &defaultDestAddress, sizeof(ipAddr_t));
 }
 
+static void APP_SampleSensorsTimerCallback()
+{
+	if(sens_humidity > 100)
+	{
+		sens_humidity = 0;
+	}
+	else
+	{
+		sens_humidity ++;
+	}
+
+	if(sens_temp > 55)
+	{
+		Led_UpdateRgbState(0, 0, 255); //Red, Green, Blue
+		App_UpdateStateLeds(gDeviceState_AppLedRgb_c);
+		sens_temp = 0;
+	}
+	else if(sens_temp > 36)
+	{
+		Led_UpdateRgbState(255, 0, 0); //Red, Green, Blue
+		App_UpdateStateLeds(gDeviceState_AppLedRgb_c);
+		sens_temp++;
+	}
+	else if(sens_temp > 18)
+	{
+		Led_UpdateRgbState(255, 255, 0); //Red, Green, Blue
+		App_UpdateStateLeds(gDeviceState_AppLedRgb_c);
+		sens_temp++;
+	}
+	else
+	{
+		sens_temp++;
+	}
+}
+
 /*!*************************************************************************************************
 \private
-\fn     static void APP_CoapLedCb(sessionStatus sessionStatus, void *pData,
+\fn     static void APP_CoapConfigCb(sessionStatus sessionStatus, void *pData,
                                   coapSession_t *pSession, uint32_t dataLen)
-\brief  This function is the callback function for CoAP LED message.
+\brief  This function is the callback function for CoAP cfg message.
 \brief  It performs the required operations and sends back a CoAP ACK message.
 
 \param  [in]    sessionStatus   Status for CoAP session
@@ -1137,7 +1186,7 @@ static void APP_LocalDataSinkRelease
 \param  [in]    pSession        Pointer to CoAP session
 \param  [in]    dataLen         Length of CoAP payload
 ***************************************************************************************************/
-static void APP_CoapLedCb
+static void APP_CoapConfigCb
 (
     coapSessionStatus_t sessionStatus,
     void *pData,
@@ -1145,17 +1194,68 @@ static void APP_CoapLedCb
     uint32_t dataLen
 )
 {
-    /* Process the command only if it is a POST method */
-    if((pData) && (sessionStatus == gCoapSuccess_c) && (pSession->code == gCoapPOST_c))
+	uint8_t* pIndex = NULL;
+    uint8_t *pTempString = MEM_BufferAlloc(10);
+	uint32_t ackPloadSize = 0, maxDisplayedString = 10;
+
+    /* Send CoAP ACK */
+    if(gCoapGET_c == pSession->code)
     {
-        APP_ProcessLedCmd(pData, dataLen);
+        char addrStr[INET6_ADDRSTRLEN];
+        ntop(AF_INET6, &pSession->remoteAddr, addrStr, INET6_ADDRSTRLEN);
+
+    	if(pTempString) {
+    	    /* Clear data and reset buffers */
+    	    FLib_MemSet(pTempString, 0, 10);
+
+    	    /* Compute output */
+    	    pIndex = pTempString;
+    	    NWKU_PrintDec((uint64_t)(sampling_period_ms), pIndex, 4, TRUE);
+    		ackPloadSize = strlen((char*)pTempString);
+          //  set_text_color_green();
+            shell_printf("\r\n Get command received from IPv6 Address: %s \n\r", addrStr);
+    	}
+    }
+    else if((gCoapPOST_c == pSession->code) && (sessionStatus == gCoapSuccess_c))
+    {
+    	char addrStr[INET6_ADDRSTRLEN];
+    	        uint8_t temp[10];
+
+    	        ntop(AF_INET6, &pSession->remoteAddr, addrStr, INET6_ADDRSTRLEN);
+
+
+    	        if(0 != dataLen)
+    	        {
+    	            /* Prevent from buffer overload */
+    	            (dataLen >= maxDisplayedString) ? (dataLen = (maxDisplayedString - 1)) : (dataLen);
+    	            temp[dataLen]='\0';
+    	            FLib_MemCpy(temp,pData,dataLen);
+    	            shell_printf("\r\n New sampling period:%s. From IPv6 Address: %s\n\r", temp, addrStr);
+    	        	sampling_period_ms = (uint32_t)NWKU_atol((char*)temp);
+    	        	// Start the sampling period timer
+    	        	if(gTmrInvalidTimerID_c == sampling_tmr) {
+    	                sampling_tmr = TMR_AllocateTimer();
+    	        	}
+
+    	            TMR_StartIntervalTimer(sampling_tmr, sampling_period_ms, APP_SampleSensorsTimerCallback, NULL);
+    	        	TMR_StopTimer(sampling_tmr);
+    	        	TMR_StartIntervalTimer(sampling_tmr, sampling_period_ms, APP_SampleSensorsTimerCallback, NULL);
+    	        }
+    	        else {
+    	            shell_printf("\r\n Invalid config message from IPv6 Address: %s\n\r", temp, addrStr);
+    	        }
     }
 
-    /* Send the reply if the status is Success or Duplicate */
-    if((gCoapFailure_c != sessionStatus) && (gCoapConfirmable_c == pSession->msgType))
+    if(gCoapConfirmable_c == pSession->msgType)
     {
-        /* Send CoAP ACK */
-        COAP_Send(pSession, gCoapMsgTypeAckSuccessChanged_c, NULL, 0);
+        if(gCoapGET_c == pSession->code)
+        {
+            COAP_Send(pSession, gCoapMsgTypeAckSuccessChanged_c, pTempString, ackPloadSize);
+        }
+        else
+        {
+            COAP_Send(pSession, gCoapMsgTypeAckSuccessChanged_c, NULL, 0);
+        }
     }
 }
 
@@ -1257,6 +1357,39 @@ static void APP_ProcessLedCmd
     }
 }
 
+static void* App_GetTemp()
+{
+    int32_t temperature = (int32_t)sens_temp;
+    uint8_t* pIndex = NULL;
+    uint8_t sTemp[] = "Temp: ";
+    uint8_t * sendTemperatureData = MEM_BufferAlloc(20);
+    if(NULL == sendTemperatureData)
+    {
+      return sendTemperatureData;
+    }
+
+    /* Clear data and reset buffers */
+    FLib_MemSet(sendTemperatureData, 0, 20);
+
+    /* Compute output */
+    pIndex = sendTemperatureData;
+    FLib_MemCpy(pIndex, sTemp, SizeOfString(sTemp));
+    pIndex += SizeOfString(sTemp);
+    NWKU_PrintDec((uint8_t)(temperature), pIndex, 2, TRUE);
+    pIndex += 2; /* keep only the first 2 digits */
+    *pIndex = '.';
+    pIndex++;
+    NWKU_PrintDec((uint8_t)(temperature%100), pIndex, 1, TRUE);
+    pIndex += 1;
+    *pIndex = 0x20;
+    pIndex += 1;
+    *pIndex = 0x2E;
+    pIndex += 1;
+    *pIndex = 'c';
+
+    return sendTemperatureData;
+}
+
 /*!*************************************************************************************************
 \private
 \fn     static void APP_CoapTempCb(sessionStatus sessionStatus, void *pData,
@@ -1284,31 +1417,83 @@ static void APP_CoapTempCb
     if(gCoapGET_c == pSession->code)
     {
         /* Get Temperature */
-        pTempString = App_GetTempDataString();
+        pTempString = App_GetTemp();
         ackPloadSize = strlen((char*)pTempString);
     }
-    /* Do not parse the message if it is duplicated */
-    else if((gCoapPOST_c == pSession->code) && (sessionStatus == gCoapSuccess_c))
+
+    if(gCoapConfirmable_c == pSession->msgType)
     {
-        if(NULL != pData)
+        if(gCoapGET_c == pSession->code)
         {
-            char addrStr[INET6_ADDRSTRLEN];
-            uint8_t temp[10];
-
-            ntop(AF_INET6, &pSession->remoteAddr, addrStr, INET6_ADDRSTRLEN);
-            shell_write("\r");
-
-            if(0 != dataLen)
-            {
-                /* Prevent from buffer overload */
-                (dataLen >= maxDisplayedString) ? (dataLen = (maxDisplayedString - 1)) : (dataLen);
-                temp[dataLen]='\0';
-                FLib_MemCpy(temp,pData,dataLen);
-                shell_printf((char*)temp);
-            }
-            shell_printf("\tFrom IPv6 Address: %s\n\r", addrStr);
-            shell_refresh();
+            COAP_Send(pSession, gCoapMsgTypeAckSuccessChanged_c, pTempString, ackPloadSize);
         }
+        else
+        {
+            COAP_Send(pSession, gCoapMsgTypeAckSuccessChanged_c, NULL, 0);
+        }
+    }
+
+    if(pTempString)
+    {
+        MEM_BufferFree(pTempString);
+    }
+}
+
+static void* APP_GetHumidity()
+{
+    int32_t temperature = (int32_t)sens_humidity;
+    uint8_t* pIndex = NULL;
+    uint8_t sTemp[] = "Humidity: ";
+    uint8_t * sendTemperatureData = MEM_BufferAlloc(20);
+    if(NULL == sendTemperatureData)
+    {
+      return sendTemperatureData;
+    }
+
+    /* Clear data and reset buffers */
+    FLib_MemSet(sendTemperatureData, 0, 20);
+
+    /* Compute output */
+    pIndex = sendTemperatureData;
+    FLib_MemCpy(pIndex, sTemp, SizeOfString(sTemp));
+    pIndex += SizeOfString(sTemp);
+    NWKU_PrintDec((uint8_t)(temperature), pIndex, 3, TRUE);
+    pIndex += 3; /* keep only the first 2 digits */
+    *pIndex = '%';
+//    pIndex++;
+//    NWKU_PrintDec((uint8_t)(temperature), pIndex, 2, TRUE);
+    return sendTemperatureData;
+}
+
+/*!*************************************************************************************************
+\private
+\fn     static void APP_CoapHumidityCb(sessionStatus sessionStatus, void *pData,
+                                   coapSession_t *pSession, uint32_t dataLen)
+\brief  This function is the callback function for CoAP temperature message.
+\brief  It sends the temperature value in a CoAP ACK message.
+
+\param  [in]    sessionStatus   Status for CoAP session
+\param  [in]    pData           Pointer to CoAP message payload
+\param  [in]    pSession        Pointer to CoAP session
+\param  [in]    dataLen         Length of CoAP payload
+***************************************************************************************************/
+static void APP_CoapHumidityCb
+(
+    coapSessionStatus_t sessionStatus,
+    void *pData,
+    coapSession_t *pSession,
+    uint32_t dataLen
+)
+{
+    uint8_t *pTempString = NULL;
+    uint32_t ackPloadSize = 0, maxDisplayedString = 10;
+
+    /* Send CoAP ACK */
+    if(gCoapGET_c == pSession->code)
+    {
+        /* Get Temperature */
+        pTempString = APP_GetHumidity();
+        ackPloadSize = strlen((char*)pTempString);
     }
 
     if(gCoapConfirmable_c == pSession->msgType)
