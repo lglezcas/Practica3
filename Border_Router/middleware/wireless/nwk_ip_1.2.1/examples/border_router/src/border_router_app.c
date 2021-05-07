@@ -101,6 +101,7 @@ Private macros
 #define APP_CONFIG_URI_PATH                     "/configspr"
 #define APP_OPMODE_URI_PATH						"/opmode"
 #define APP_TEMP_URI_PATH						"/temp"
+#define APP_HUM_URI_PATH						"/humidity"
 #define APP_SINK_URI_PATH                       "/sink"
 #if LARGE_NETWORK
 #define APP_RESET_TO_FACTORY_URI_PATH           "/reset"
@@ -127,10 +128,12 @@ static bool_t mFirstPushButtonPressed = FALSE;
 
 static bool_t mJoiningIsAppInitiated = FALSE;
 
-static uint32_t sampling_period_ms = 500;
+static uint32_t sampling_period_ms = 1000;
 static tmrTimerID_t sampling_tmr = gTmrInvalidTimerID_c;
 static uint8_t Operation_mode = OperationMode_Auto;
-
+static bool_t Transmit_completed = TRUE;
+static uint32_t temp_received = 0;
+static uint32_t hum_received = 0;
 
 /*==================================================================================================
 Private prototypes
@@ -172,6 +175,7 @@ Public global variables declarations
 const coapUriPath_t gAPP_OPMODE_URI_PATH  = {SizeOfString(APP_OPMODE_URI_PATH), (uint8_t *)APP_OPMODE_URI_PATH};
 const coapUriPath_t gAPP_CONFIG_URI_PATH = {SizeOfString(APP_CONFIG_URI_PATH), (uint8_t *)APP_CONFIG_URI_PATH};
 const coapUriPath_t gAPP_TEMP_URI_PATH = {SizeOfString(APP_TEMP_URI_PATH), (uint8_t *)APP_TEMP_URI_PATH};
+const coapUriPath_t gAPP_HUM_URI_PATH = {SizeOfString(APP_HUM_URI_PATH), (uint8_t *)APP_HUM_URI_PATH};
 const coapUriPath_t gAPP_SINK_URI_PATH = {SizeOfString(APP_SINK_URI_PATH), (uint8_t *)APP_SINK_URI_PATH};
 #if LARGE_NETWORK
 const coapUriPath_t gAPP_RESET_URI_PATH = {SizeOfString(APP_RESET_TO_FACTORY_URI_PATH), (uint8_t *)APP_RESET_TO_FACTORY_URI_PATH};
@@ -1201,13 +1205,7 @@ static void APP_CoapConfigCb
             set_text_color_green();
             shell_printf("\r\n New sampling period:%s. From IPv6 Address: %s\n\r", temp, addrStr);
         	sampling_period_ms = (uint32_t)NWKU_atol((char*)temp);
-        	// Start the sampling period timer
-        	if(gTmrInvalidTimerID_c == sampling_tmr) {
-                sampling_tmr = TMR_AllocateTimer();
-        	}
 
-    //        TMR_StartIntervalTimer(sampling_tmr, sampling_period_ms, APP_SampleSensorsTimerCallback, NULL);
-     //   	TMR_StopTimer(sampling_tmr);
      //   	TMR_StartIntervalTimer(sampling_tmr, sampling_period_ms, APP_SampleSensorsTimerCallback, NULL);
     //    	(void)NWKU_SendMsg(APP_SendGetDevname, NULL, mpAppThreadMsgQueue);
         }
@@ -1237,6 +1235,123 @@ static void APP_CoapConfigCb
     }
 }
 
+static void APP_CoapAckReceive
+(
+    coapSessionStatus_t sessionStatus,
+    void *pData,
+    coapSession_t *pSession,
+    uint32_t dataLen
+)
+{
+    char remoteAddrStr[INET6_ADDRSTRLEN];
+    uint8_t temp[dataLen];
+    uint8_t temp2[3];
+
+    if(gCoapSuccess_c == sessionStatus)
+    {
+        ntop(AF_INET6, &pSession->remoteAddr, remoteAddrStr, INET6_ADDRSTRLEN);
+        /* coap rsp from <IP addr>: <ACK> <rspcode: X.XX> <payload ASCII> */
+        shell_printf("coap rsp from ");
+        shell_printf(remoteAddrStr);
+
+        if (gCoapAcknowledgement_c == pSession->msgType)
+        {
+            shell_printf(" ACK ");
+        }
+
+        if(0 != dataLen)
+        {
+            temp[dataLen]='\0';
+            FLib_MemCpy(temp, pData, dataLen);
+            if(temp[0] == 'H')
+            {
+            	temp2[0] = temp[10];
+            	temp2[1] = temp[11];
+            	temp2[2] = temp[12];
+            	hum_received = (uint32_t)NWKU_atol((char*)temp2);
+            }
+            else if(temp[0] == 'T')
+            {
+            	temp2[0] = temp[6];
+            	temp2[1] = temp[7];
+            	temp2[2] = temp[8];
+            	temp_received = (uint32_t)NWKU_atol((char*)temp2);
+            }
+            shell_printf((char *)temp);
+        }
+    }
+    else
+    {
+        shell_printf("No response received!");
+    }
+    Transmit_completed = TRUE;
+ //   SHELL_Resume();
+}
+
+static void APP_SendGetInfo()
+{
+	uint8_t *pCommand = NULL;
+	uint8_t dataLen = 0;
+	coapSession_t *pSessionTemp = NULL;
+	coapSession_t *pSessionHum = NULL;
+	char addrStr[INET6_ADDRSTRLEN];
+	static bool_t hum_or_temp = TRUE;
+
+	if(Transmit_completed == TRUE)
+	{
+		ntop(AF_INET6, &gCoapDestAddress, addrStr, INET6_ADDRSTRLEN);
+		shell_printf("\n\r\tDestination Address: %s\n\r", addrStr);
+		Transmit_completed = FALSE;
+
+		pSessionTemp = COAP_OpenSession(mAppCoapInstId);
+
+		if(pSessionTemp)
+		{
+			coapMsgTypesAndCodes_t coapMessageType = gCoapMsgTypeConGet_c;
+
+			pSessionTemp->pCallback = APP_CoapAckReceive;
+
+			FLib_MemCpy(&pSessionTemp->remoteAddr, &gCoapDestAddress, sizeof(ipAddr_t));
+
+			if(hum_or_temp == TRUE)
+			{
+				COAP_SetUriPath(pSessionTemp,(coapUriPath_t *)&gAPP_TEMP_URI_PATH);
+				hum_or_temp = FALSE;
+			}
+			else
+			{
+				COAP_SetUriPath(pSessionTemp,(coapUriPath_t *)&gAPP_HUM_URI_PATH);
+				hum_or_temp = TRUE;
+			}
+			COAP_Send(pSessionTemp, coapMessageType, pCommand, dataLen);
+		}
+	}
+}
+
+static void APP_GetTemp(void *pParam)
+{
+	APP_SendGetInfo();
+}
+static void APP_Sprinkler()
+{
+    (void)NWKU_SendMsg(APP_GetTemp, NULL, mpAppThreadMsgQueue);
+
+	if(temp_received > 36)
+	{
+		Led_UpdateRgbState(0, 255, 0); //Red, Green, Blue
+		App_UpdateStateLeds(gDeviceState_AppLedRgb_c);
+	}
+	else if(temp_received > 18 && hum_received < 50)
+	{
+		Led_UpdateRgbState(0, 0, 255); //Red, Green, Blue
+		App_UpdateStateLeds(gDeviceState_AppLedRgb_c);
+	}
+	else
+	{
+		App_UpdateStateLeds(gDeviceState_AppLedOff_c);
+	}
+}
+
 /*!*************************************************************************************************
 \private
 \fn     static void APP_CoapLedCb(coapSessionStatus_t sessionStatus, void *pData,
@@ -1253,15 +1368,21 @@ static void APP_CoapOpModeCb
 (
     coapSessionStatus_t sessionStatus,
     void *pData,
-    coapSession_t *pSession,
-    uint32_t dataLen
+	coapSession_t *pSession,
+	uint32_t dataLen
 )
 {
+	// Start the sampling period timer
+	if(gTmrInvalidTimerID_c == sampling_tmr) {
+		sampling_tmr = TMR_AllocateTimer();
+	}
 	/* Process the command only if it is a POST method */
 	if((pData) && (sessionStatus == gCoapSuccess_c) && (pSession->code == gCoapPOST_c))
 	{
 		if(FLib_MemCmp(pData, "auto",2))
 		{
+			TMR_StartIntervalTimer(sampling_tmr, sampling_period_ms, APP_Sprinkler, NULL);
+
 			if(Operation_mode == OperationMode_Auto)
 			{
 				set_text_color_green();
@@ -1276,6 +1397,8 @@ static void APP_CoapOpModeCb
 		}
         else if(FLib_MemCmp(pData, "manual",3))
         {
+			TMR_StopTimer(sampling_tmr);
+
 			if(Operation_mode == OperationMode_Manual)
 			{
 				set_text_color_green();

@@ -5,7 +5,7 @@ from coapthon.client.helperclient import HelperClient
 # or the one listed as Interface 1: 6LoWPAN,  Unique local address
 #host = "fe80::260:37ff:fe00:fa5d"
 hostBR = "fe80::260:37ff:fe00:fa5d"
-hostED = "fd01::3ead:411:6422:9e7e:f3c"
+hostED = "fd01::3ead:2402:95c2:3d3f:bf20"
 port = 5683
 path ="led"
 
@@ -16,14 +16,14 @@ while True:
     if username == "BR":
         host = hostBR
         print("""Select one command:
-        1: Change or check IP address from Hub Sensor
+        1: Change or check sensor reading period
         2: Change operation mode""")
         command_selected = input()
         if command_selected == "1":
-            path = "ipconfig"
-            print("""IP address sensor hub menu:
-            1: Get current IP address
-            2: Change IP address""")
+            path = "configspr"
+            print("""Sensor reading period menu:
+            1: Get current period
+            2: Change period""")
             inst_selected = input()
             if inst_selected == "1":
                 client = HelperClient(server=(host, port))
@@ -31,7 +31,7 @@ while True:
                 print(response.pretty_print())
                 client.stop()
             elif inst_selected == "2":
-                new_addres = input("Write new address")
+                new_addres = input("Write new period")
                 client = HelperClient(server=(host, port))
                 response = client.post(path,new_addres)
                 print(response.pretty_print())
